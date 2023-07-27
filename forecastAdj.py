@@ -1,9 +1,8 @@
 import pandas as pd
-from scipy.stats import zscore
 import datetime
-import matplotlib.pyplot as plt
+import numpy as np
 
-# Function to convert quarter-year to datetime
+# Function to convert quarter to datetime
 def convert_qtr_to_date(qtr):
     qtr, year = qtr.split('FY')
     if qtr == 'Q1':
@@ -17,59 +16,60 @@ def convert_qtr_to_date(qtr):
     year = int(year) + 2000
     return datetime.datetime(year, month, 1)
 
-# Load the actuals and forecast data
-actuals_data = pd.read_excel("platform_3m_actuals_new.xlsx")
-forecast_data = pd.read_csv("mviai_platform_3m_forecast.csv")
+# Load the data from the Excel file
+df = pd.read_excel("platform_3m_actuals_new.xlsx")
 
-# Filter for '8k_Chassis' Platform
-actuals_data = actuals_data[actuals_data['Platform'] == 'NCS_Fixed - 4.8T']
-forecast_data = forecast_data[forecast_data['Platform'] == 'NCS_Fixed - 4.8T']
+# Filter out the data for the 8k_Chassis platform
+df_8k_chassis = df[df['Platform'] == '8k_Chassis']
 
-print("Actuals Data:")
-print(actuals_data)
+# Convert the 'qtr' column to datetime
+df_8k_chassis['sdate'] = df_8k_chassis['qtr'].apply(convert_qtr_to_date)
 
-print("Forecast Data:")
-print(forecast_data)
+# Calculate the mean and deviation over a rolling window of 3 quarters
+df_8k_chassis = df_8k_chassis.sort_values(by="sdate")
+df_8k_chassis['mean'] = df_8k_chassis['Bookings_3m'].rolling(window=3).mean()
+df_8k_chassis['deviation'] = df_8k_chassis['Bookings_3m'].rolling(window=3).std()
 
-# Convert the quarter-year to datetime
-actuals_data['qtr'] = actuals_data['qtr'].apply(convert_qtr_to_date)
-forecast_data['qtr'] = forecast_data['qtr'].apply(convert_qtr_to_date)
+# The naive mean and naive deviation are the last values from the 'mean' and 'deviation' columns
+df_8k_chassis['naivemean'] = df_8k_chassis['mean'].shift(1)
+df_8k_chassis['naivedeviation'] = df_8k_chassis['deviation'].shift(1)
 
-# Merge the actuals and forecast data by quarter
-merged_data = pd.merge(actuals_data, forecast_data, on=['Platform','qtr'], how='outer')
+# Calculate the lower limit and upper limit based on naivemean and naivedeviation
+df_8k_chassis['lower limit'] = df_8k_chassis['naivemean'] - 3*df_8k_chassis['naivedeviation']
+df_8k_chassis['upper limit'] = df_8k_chassis['naivemean'] + 3*df_8k_chassis['naivedeviation']
 
-# Drop the NaN values
-merged_data = merged_data.dropna()
+# Calculate the Z-score
+df_8k_chassis['z_score'] = (df_8k_chassis['Bookings_3m'] - df_8k_chassis['naivemean']) / df_8k_chassis['naivedeviation']
 
-# Calculate the Z-scores for the 'Bookings_3m' column in the actuals data
-merged_data['Z_score'] = zscore(merged_data['Bookings_3m'])
+# Identify outliers based on Z-score
+df_8k_chassis['actuals_outlier'] = np.abs(df_8k_chassis['z_score']) > 3
 
-# Define the confidence interval (e.g., 95% corresponds to 1.96 standard deviations)
-confidence_interval = 1.96
+# Adjust the outliers
+df_8k_chassis['actuals_adjusted'] = df_8k_chassis.apply(
+    lambda row: row['naivemean'] + 3*row['naivedeviation'] if row['z_score'] > 3
+                else row['naivemean'] - 3*row['naivedeviation'] if row['z_score'] < -3
+                else row['Bookings_3m'], axis=1
+)
 
-# Identify the outliers in the forecast data
-merged_data['Outlier'] = (merged_data['Z_score'] < -confidence_interval) | (merged_data['Z_score'] > confidence_interval)
+# Save to csv
+df_8k_chassis.to_csv('8k_chassis_actuals_adjusted.csv', index=False)
 
-# Cap the outliers at the closest boundary of the confidence interval
-mean = merged_data['Bookings_3m'].mean()
-std_dev = merged_data['Bookings_3m'].std()
+# Load the forecast data
+df_forecast = pd.read_csv("mviai_platform_3m_forecast.csv")
 
-# Store the adjusted forecasts in a new column 'Adjusted_Forecast_3m'
-merged_data['Adjusted_Forecast_3m'] = merged_data['Forecast_3m']
-merged_data.loc[merged_data['Z_score'] < -confidence_interval, 'Adjusted_Forecast_3m'] = mean - confidence_interval * std_dev
-merged_data.loc[merged_data['Z_score'] > confidence_interval, 'Adjusted_Forecast_3m'] = mean + confidence_interval * std_dev
+# Filter out the data for the 8k_Chassis platform
+df_forecast = df_forecast[df_forecast['Platform'] == '8k_Chassis']
 
-# Print the merged data with the adjusted forecasts
-print(merged_data)
+# Convert the 'qtr' column in the forecast data to datetime
+df_forecast['fdate'] = df_forecast['qtr'].apply(convert_qtr_to_date)
 
-# Save the adjusted data to a CSV file
-merged_data.to_csv('merged_data_adjusted.csv')
+# Sort the forecast data by 'fdate'
+df_forecast = df_forecast.sort_values(by="fdate")
 
-# Create a plot
-plt.figure(figsize=(10,6))
-plt.plot(merged_data['qtr'], merged_data['Bookings_3m'], label='Actuals')
-plt.plot(merged_data['qtr'], merged_data['Forecast_3m'], label='Forecast')
-plt.plot(merged_data['qtr'], merged_data['Adjusted_Forecast_3m'], label='Adjusted Forecast')
-plt.fill_between(merged_data['qtr'], mean - confidence_interval * std_dev, mean + confidence_interval * std_dev, color='b', alpha=.1)
-plt.legend()
-plt.show()
+# Merge df_8k_chassis with df_forecast on the dates
+df_8k_chassis = pd.merge(df_8k_chassis, df_forecast[['fdate', 'Forecast_3m']], left_on='sdate', right_on='fdate', how='left')
+
+print(df_8k_chassis.head(10))
+
+#save to csv
+df_8k_chassis.to_csv('8k_chassis_actuals_adjusted_forecast.csv', index=False)
